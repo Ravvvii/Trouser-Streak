@@ -7,7 +7,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
-import meteordevelopment.meteorclient.systems.modules.player.AutoTool; // Import AutoTool
+import meteordevelopment.meteorclient.systems.modules.player.AutoTool;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -50,8 +50,8 @@ public class SuperInstaMine extends Module {
             .build());
 
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
-            .name("Range (Radius)")
-            .description("The range around the center block to break.")
+            .name("Range")
+            .description("0 = Single Block (Fastest). >0 = Area Mode.")
             .defaultValue(0)
             .min(0)
             .sliderMax(7)
@@ -61,13 +61,14 @@ public class SuperInstaMine extends Module {
             .name("Auto Orient")
             .description("Automatically orients the breaking area based on your pitch.")
             .defaultValue(true)
+            .visible(() -> range.get() > 0)
             .build());
 
     private final Setting<DirectionMode> directionMode = sgGeneral.add(new EnumSetting.Builder<DirectionMode>()
             .name("Direction Mode")
             .description("Forcing vertical or horizontal break.")
             .defaultValue(DirectionMode.Vertical)
-            .visible(() -> !aorient.get())
+            .visible(() -> !aorient.get() && range.get() > 0)
             .build());
 
     private final Setting<Integer> tickDelay = sgGeneral.add(new IntSetting.Builder()
@@ -121,162 +122,148 @@ public class SuperInstaMine extends Module {
 
     // --- Variables ---
     private int ticks;
-    private final List<BlockPos> targets = new ArrayList<>();
+    
+    // Optimization: Single Block Mode Variables
+    private final BlockPos.Mutable singleTargetPos = new BlockPos.Mutable(0, -128, 0);
+    
+    // Optimization: Area Mode Variables
+    private final List<BlockPos> areaTargets = new ArrayList<>();
     private BlockPos originPos = null;
+    
     private Direction breakDirection;
 
     public SuperInstaMine() {
-        super(Trouser.Main, "SuperInstaMine", "Instantly mines blocks in an area with AutoTool support.");
+        super(Trouser.Main, "SuperInstaMine", "Instantly mines blocks. Range 0 = Optimized Single Target.");
     }
 
     @Override
     public void onActivate() {
         ticks = 0;
         originPos = null;
-        targets.clear();
+        areaTargets.clear();
+        singleTargetPos.set(0, -128, 0);
     }
 
     @EventHandler
     private void onStartBreakingBlock(StartBreakingBlockEvent event) {
         if (mc.player == null || mc.world == null) return;
         
-        // Set origin untuk titik pusat area mining
-        originPos = event.blockPos;
         breakDirection = event.direction;
         
-        // Kita cancel event asli agar kita bisa handle sendiri dengan packet instant
-        // Tapi kalau mau logic vanilla break tetap jalan, jangan di cancel.
-        // SuperInstaMine biasanya menimpa logic vanilla, jadi kita biarkan event berjalan
-        // tapi kita ambil alih logic "area" nya di onTick.
+        // Update targets based on mode
+        if (range.get() == 0) {
+            singleTargetPos.set(event.blockPos);
+            originPos = null; // Disable area mode tracking
+        } else {
+            originPos = event.blockPos; // Enable area mode tracking
+        }
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.player == null || mc.world == null || originPos == null) return;
-
-        // Validasi jarak origin (agar tidak mining ghost block yang jauh)
-        if (mc.player.squaredDistanceTo(originPos.toCenterPos()) > 36) { // 6 blocks
-            originPos = null;
-            return;
-        }
+        if (mc.player == null || mc.world == null) return;
 
         if (ticks >= tickDelay.get()) {
             ticks = 0;
-            calculateTargets(); // Hitung blok mana saja yang mau dihancurkan
-
-            for (BlockPos pos : targets) {
-                if (!BlockUtils.canBreak(pos)) continue;
+            
+            // --- MODE 1: SINGLE BLOCK (FASTEST / LOW END PC) ---
+            if (range.get() == 0) {
+                if (singleTargetPos.getY() == -128) return; // No target set
+                performMining(singleTargetPos);
+            } 
+            
+            // --- MODE 2: AREA MODE ---
+            else {
+                if (originPos == null) return;
                 
-                BlockState state = mc.world.getBlockState(pos);
-                if (!shouldMine(state)) continue;
-
-                // --- AUTO TOOL INTEGRATION ---
-                if (useAutoTool.get() && Modules.get().isActive(AutoTool.class)) {
-                    equipBestTool(state);
+                // Safety check distance
+                if (mc.player.squaredDistanceTo(originPos.toCenterPos()) > 49) { // 7 blocks radius
+                    originPos = null;
+                    return;
                 }
-
-                // --- ROTATION & PACKET ---
-                Runnable miningAction = () -> {
-                    // Kirim Packet Instant Break (Start & Stop bersamaan)
-                    mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, breakDirection));
-                    mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, breakDirection));
-                    
-                    if (swing.get()) mc.player.swingHand(Hand.MAIN_HAND); // FIX: Client side swing
-                };
-
-                if (rotate.get()) {
-                    Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), miningAction);
-                } else {
-                    miningAction.run();
+                
+                calculateAreaTargets(); // Recalculate area
+                for (BlockPos pos : areaTargets) {
+                    performMining(pos);
                 }
             }
+            
         } else {
             ticks++;
         }
     }
 
-    // --- Core Logic: Menghitung Area Target ---
-    private void calculateTargets() {
-        targets.clear();
-        targets.add(originPos); // Selalu tambahkan pusat
+    // --- Mining Logic (The Core) ---
+    private void performMining(BlockPos pos) {
+        if (mc.world.isOutOfHeightLimit(pos) || !BlockUtils.canBreak(pos)) return;
 
-        int r = range.get();
-        if (r == 0) return;
+        BlockState state = mc.world.getBlockState(pos);
+        if (!shouldMine(state)) return;
 
-        Direction playerFacing = mc.player.getHorizontalFacing();
-        float pitch = mc.player.getPitch();
-        
-        // Tentukan Mode: Vertical atau Horizontal
-        boolean isVertical = (aorient.get() && (pitch > 30 || pitch < -30)) || (!aorient.get() && directionMode.get() == DirectionMode.Vertical);
+        // AutoTool Logic
+        if (useAutoTool.get() && Modules.get().isActive(AutoTool.class)) {
+            equipBestTool(state);
+        }
 
-        // Logika Loop (Pengganti if hardcoded)
-        // Kita memperluas area berdasarkan arah hadap player
-        
-        for (int i = 0; i <= r; i++) {
-             // Logic sederhana: Membuat box/tunnel di depan/sekitar origin
-             // Ini meniru perilaku SuperInstaMine lama yang memperluas ke samping dan atas/bawah
-             addLayer(i, playerFacing, isVertical);
+        Runnable miningAction = () -> {
+            // Aggressive Rebreak Packet Logic (Start + Stop)
+            Direction dir = breakDirection == null ? Direction.UP : breakDirection;
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, dir));
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir));
+            
+            if (swing.get()) mc.player.swingHand(Hand.MAIN_HAND);
+        };
+
+        if (rotate.get()) {
+            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), miningAction);
+        } else {
+            miningAction.run();
         }
     }
 
-    private void addLayer(int offset, Direction facing, boolean vertical) {
-        // Offset logic yang meniru "Expanding Cube" tapi lebih bersih
-        // Menggunakan originPos sebagai titik 0,0,0
-        
-        // Jika Vertical (Gali ke atas/bawah atau dinding depan)
-        // Jika Horizontal (Gali lantai/atap)
-        
-        // Implementasi sederhana "Expanding Box" di sekitar origin
-        // Anda bisa kreasikan loop x,y,z disini.
-        // Untuk menjaga kompabilitas dengan gaya "Tunnel/Wall" SuperInstaMine:
-        
-        for (int x = -offset; x <= offset; x++) {
-            for (int y = -offset; y <= offset; y++) {
-                for (int z = -offset; z <= offset; z++) {
-                    // Hindari duplikasi blok pusat
-                    if (x==0 && y==0 && z==0) continue; 
-                    
-                    // Filter berdasarkan arah (agar tidak mining ke belakang player)
-                    BlockPos target = originPos.add(x, y, z);
-                    
-                    // Disini kita bisa filter lebih lanjut agar bentuknya sesuai "InstaMine" lama
-                    // Kode lama sangat spesifik (hanya blockPos1, 2, dst).
-                    // Versi baru ini akan menghancurkan CUBE area (lebih efektif).
-                    
-                    // Filter jarak Chebyshev agar bentuknya kotak rapi sesuai range
-                    if (Math.abs(x) > offset || Math.abs(y) > offset || Math.abs(z) > offset) continue;
-                    
-                    if (!targets.contains(target)) targets.add(target);
+    // --- Area Calculation (Only used if Range > 0) ---
+    private void calculateAreaTargets() {
+        areaTargets.clear();
+        areaTargets.add(originPos); // Add center
+
+        int r = range.get();
+        Direction playerFacing = mc.player.getHorizontalFacing();
+        float pitch = mc.player.getPitch();
+        boolean isVertical = (aorient.get() && (pitch > 30 || pitch < -30)) || (!aorient.get() && directionMode.get() == DirectionMode.Vertical);
+
+        for (int i = 1; i <= r; i++) {
+             // Simple expanding logic
+             for (int x = -i; x <= i; x++) {
+                for (int y = -i; y <= i; y++) {
+                    for (int z = -i; z <= i; z++) {
+                        if (Math.abs(x) > i || Math.abs(y) > i || Math.abs(z) > i) continue; // Hollow cube layers check if needed, strictly expanding
+                        
+                        // Basic filtering to create "InstaMine" shapes
+                        BlockPos target = originPos.add(x, y, z);
+                        if (!areaTargets.contains(target)) areaTargets.add(target);
+                    }
                 }
-            }
+             }
         }
     }
     
     // --- Helper: AutoTool ---
     private void equipBestTool(BlockState state) {
-        // Menggunakan referensi logika AutoTool.getScore
         int bestSlot = -1;
         double bestScore = -1;
 
-        // Ambil setting dari AutoTool module
-        AutoTool autoTool = Modules.get().get(AutoTool.class);
-        // Kita asumsikan default setting jika gagal akses private fields, 
-        // atau kita gunakan logika dasar mining speed.
+        // Check current item first to avoid unnecessary swapping
+        ItemStack currentStack = mc.player.getMainHandStack();
+        double currentScore = AutoTool.getScore(currentStack, state, false, false, AutoTool.EnchantPreference.Fortune, itemStack -> true);
         
+        // If current tool is good enough (valid score), keep it? 
+        // Or strictly search for better? Let's strictly search for better to ensure "Insta" break.
+
         for (int i = 0; i < 9; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
             if (stack.isEmpty()) continue;
             
-            // Kita panggil static method getScore dari AutoTool yang Anda kirim
-            // Karena method itu public static, kita bisa akses langsung!
-            double score = AutoTool.getScore(
-                stack, 
-                state, 
-                false, // Default silkTouchEnderChest (karena kita ga bisa akses setting private)
-                false, // Default fortuneOre
-                AutoTool.EnchantPreference.Fortune, 
-                itemStack -> true // Accept all valid tools
-            );
+            double score = AutoTool.getScore(stack, state, false, false, AutoTool.EnchantPreference.Fortune, itemStack -> true);
 
             if (score > bestScore) {
                 bestScore = score;
@@ -284,8 +271,9 @@ public class SuperInstaMine extends Module {
             }
         }
 
-        if (bestSlot != -1 && bestSlot != mc.player.getInventory().selectedSlot) {
-            InvUtils.swap(bestSlot, true); // true = swap back logic handled by InvUtils/AutoTool check
+        // Only swap if we found a better tool AND it's better than current
+        if (bestSlot != -1 && bestScore > currentScore) {
+            InvUtils.swap(bestSlot, true);
         }
     }
 
@@ -300,17 +288,24 @@ public class SuperInstaMine extends Module {
 
     @EventHandler
     private void onRender(Render3DEvent event) {
-        if (!render.get() || targets.isEmpty()) return;
+        if (!render.get()) return;
 
-        for (BlockPos pos : targets) {
-            // Render hanya jika blok valid untuk dimine
-            if (BlockUtils.canBreak(pos) && shouldMine(mc.world.getBlockState(pos))) {
-                event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+        // Render Optimization for Low End PC
+        if (range.get() == 0) {
+            // Single Mode Render
+             if (singleTargetPos.getY() != -128 && BlockUtils.canBreak(singleTargetPos)) {
+                 event.renderer.box(singleTargetPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+             }
+        } else {
+            // Area Mode Render
+            for (BlockPos pos : areaTargets) {
+                if (BlockUtils.canBreak(pos)) {
+                    event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+                }
             }
         }
     }
 
-    // --- Enums ---
     public enum DirectionMode {
         Horizontal, Vertical
     }
