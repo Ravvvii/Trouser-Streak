@@ -8,6 +8,8 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.AutoTool;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -17,6 +19,8 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -39,7 +43,7 @@ public class SuperInstaMine extends Module {
 
     private final Setting<List<Block>> skippableBlox = sgGeneral.add(new BlockListSetting.Builder()
             .name("Blocks to Skip")
-            .description("Skips instamining this block.")
+            .description("Safety: Never mine these blocks (even if targeted).")
             .visible(() -> listMode.get() == ListModes.Blacklist)
             .build());
 
@@ -49,26 +53,31 @@ public class SuperInstaMine extends Module {
             .visible(() -> listMode.get() == ListModes.Whitelist)
             .build());
 
-    private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
-            .name("Range")
-            .description("0 = Single Block (Fastest). >0 = Area Mode.")
-            .defaultValue(0)
-            .min(0)
+    private final Setting<Integer> maxRange = sgGeneral.add(new IntSetting.Builder()
+            .name("Max Range")
+            .description("The radius used when Area Mode is ACTIVE.")
+            .defaultValue(5) // Default 5 biar ga terlalu berat
+            .min(1)
             .sliderMax(7)
+            .build());
+
+    private final Setting<Keybind> toggleKey = sgGeneral.add(new KeybindSetting.Builder()
+            .name("Toggle Area Key")
+            .description("Key to switch between Single Mode (Range 0) and Area Mode.")
+            .defaultValue(Keybind.none())
             .build());
 
     private final Setting<Boolean> aorient = sgGeneral.add(new BoolSetting.Builder()
             .name("Auto Orient")
             .description("Automatically orients the breaking area based on your pitch.")
             .defaultValue(true)
-            .visible(() -> range.get() > 0)
             .build());
 
     private final Setting<DirectionMode> directionMode = sgGeneral.add(new EnumSetting.Builder<DirectionMode>()
             .name("Direction Mode")
             .description("Forcing vertical or horizontal break.")
             .defaultValue(DirectionMode.Vertical)
-            .visible(() -> !aorient.get() && range.get() > 0)
+            .visible(() -> !aorient.get())
             .build());
 
     private final Setting<Integer> tickDelay = sgGeneral.add(new IntSetting.Builder()
@@ -122,26 +131,28 @@ public class SuperInstaMine extends Module {
 
     // --- Variables ---
     private int ticks;
-    
-    // Optimization: Single Block Mode Variables
     private final BlockPos.Mutable singleTargetPos = new BlockPos.Mutable(0, -128, 0);
-    
-    // Optimization: Area Mode Variables
     private final List<BlockPos> areaTargets = new ArrayList<>();
     private BlockPos originPos = null;
-    
+    private Block originBlockType = null;
     private Direction breakDirection;
+    
+    // Status Toggle
+    private boolean areaModeActive = false; // Default mati (Single Mode)
+    private boolean wasTogglePressed = false;
 
     public SuperInstaMine() {
-        super(Trouser.Main, "SuperInstaMine", "Instantly mines blocks. Range 0 = Optimized Single Target.");
+        super(Trouser.Main, "SuperInstaMine", "Use Toggle Key to switch between Single/Area.");
     }
 
     @Override
     public void onActivate() {
         ticks = 0;
         originPos = null;
+        originBlockType = null;
         areaTargets.clear();
         singleTargetPos.set(0, -128, 0);
+        areaModeActive = false; // Reset ke single setiap kali module dinyalakan
     }
 
     @EventHandler
@@ -149,13 +160,16 @@ public class SuperInstaMine extends Module {
         if (mc.player == null || mc.world == null) return;
         
         breakDirection = event.direction;
+        BlockState clickedState = mc.world.getBlockState(event.blockPos);
         
-        // Update targets based on mode
-        if (range.get() == 0) {
+        if (!areaModeActive) {
+            // Mode Single
             singleTargetPos.set(event.blockPos);
-            originPos = null; // Disable area mode tracking
+            originPos = null;
         } else {
-            originPos = event.blockPos; // Enable area mode tracking
+            // Mode Area
+            originPos = event.blockPos;
+            originBlockType = clickedState.getBlock();
         }
     }
 
@@ -163,26 +177,44 @@ public class SuperInstaMine extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
+        // --- Logic Keybind Toggle ---
+        if (toggleKey.get().isPressed()) {
+            if (!wasTogglePressed) {
+                areaModeActive = !areaModeActive;
+                wasTogglePressed = true;
+                
+                // Notifikasi Chat Kecil
+                String status = areaModeActive ? "AREA (Range " + maxRange.get() + ")" : "SINGLE (Range 0)";
+                Formatting color = areaModeActive ? Formatting.GREEN : Formatting.YELLOW;
+                ChatUtils.sendMsg(Text.literal("SuperInstaMine: ").append(Text.literal(status).formatted(color)));
+                
+                // Reset targets saat ganti mode biar bersih
+                originPos = null;
+                singleTargetPos.set(0, -128, 0);
+            }
+        } else {
+            wasTogglePressed = false;
+        }
+
         if (ticks >= tickDelay.get()) {
             ticks = 0;
             
-            // --- MODE 1: SINGLE BLOCK (FASTEST / LOW END PC) ---
-            if (range.get() == 0) {
-                if (singleTargetPos.getY() == -128) return; // No target set
+            // --- MODE 1: SINGLE BLOCK (Hemat Resource) ---
+            if (!areaModeActive) {
+                if (singleTargetPos.getY() == -128) return;
                 performMining(singleTargetPos);
             } 
             
             // --- MODE 2: AREA MODE ---
             else {
-                if (originPos == null) return;
+                if (originPos == null || originBlockType == null) return;
                 
-                // Safety check distance
-                if (mc.player.squaredDistanceTo(originPos.toCenterPos()) > 49) { // 7 blocks radius
+                if (mc.player.squaredDistanceTo(originPos.toCenterPos()) > 64) { 
                     originPos = null;
                     return;
                 }
                 
-                calculateAreaTargets(); // Recalculate area
+                calculateAreaTargets();
                 for (BlockPos pos : areaTargets) {
                     performMining(pos);
                 }
@@ -193,12 +225,17 @@ public class SuperInstaMine extends Module {
         }
     }
 
-    // --- Mining Logic (The Core) ---
+    // --- Mining Logic ---
     private void performMining(BlockPos pos) {
         if (mc.world.isOutOfHeightLimit(pos) || !BlockUtils.canBreak(pos)) return;
 
         BlockState state = mc.world.getBlockState(pos);
         if (!shouldMine(state)) return;
+
+        // Logic Area: Pastikan jenis blok sama
+        if (areaModeActive && originBlockType != null) {
+            if (state.getBlock() != originBlockType) return;
+        }
 
         // AutoTool Logic
         if (useAutoTool.get() && Modules.get().isActive(AutoTool.class)) {
@@ -206,7 +243,6 @@ public class SuperInstaMine extends Module {
         }
 
         Runnable miningAction = () -> {
-            // Aggressive Rebreak Packet Logic (Start + Stop)
             Direction dir = breakDirection == null ? Direction.UP : breakDirection;
             mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, dir));
             mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir));
@@ -221,26 +257,29 @@ public class SuperInstaMine extends Module {
         }
     }
 
-    // --- Area Calculation (Only used if Range > 0) ---
+    // --- Area Calculation ---
     private void calculateAreaTargets() {
         areaTargets.clear();
-        areaTargets.add(originPos); // Add center
+        areaTargets.add(originPos);
 
-        int r = range.get();
-        Direction playerFacing = mc.player.getHorizontalFacing();
+        int r = maxRange.get(); // Pakai setting Max Range
+        
         float pitch = mc.player.getPitch();
         boolean isVertical = (aorient.get() && (pitch > 30 || pitch < -30)) || (!aorient.get() && directionMode.get() == DirectionMode.Vertical);
 
         for (int i = 1; i <= r; i++) {
-             // Simple expanding logic
              for (int x = -i; x <= i; x++) {
                 for (int y = -i; y <= i; y++) {
                     for (int z = -i; z <= i; z++) {
-                        if (Math.abs(x) > i || Math.abs(y) > i || Math.abs(z) > i) continue; // Hollow cube layers check if needed, strictly expanding
+                        if (Math.abs(x) > i || Math.abs(y) > i || Math.abs(z) > i) continue;
                         
-                        // Basic filtering to create "InstaMine" shapes
                         BlockPos target = originPos.add(x, y, z);
-                        if (!areaTargets.contains(target)) areaTargets.add(target);
+                        
+                        // Cek jenis blok sebelum dimasukkan ke list
+                        BlockState targetState = mc.world.getBlockState(target);
+                        if (targetState.getBlock() == originBlockType) {
+                            if (!areaTargets.contains(target)) areaTargets.add(target);
+                        }
                     }
                 }
              }
@@ -252,13 +291,9 @@ public class SuperInstaMine extends Module {
         int bestSlot = -1;
         double bestScore = -1;
 
-        // Check current item first to avoid unnecessary swapping
         ItemStack currentStack = mc.player.getMainHandStack();
         double currentScore = AutoTool.getScore(currentStack, state, false, false, AutoTool.EnchantPreference.Fortune, itemStack -> true);
         
-        // If current tool is good enough (valid score), keep it? 
-        // Or strictly search for better? Let's strictly search for better to ensure "Insta" break.
-
         for (int i = 0; i < 9; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
             if (stack.isEmpty()) continue;
@@ -271,7 +306,6 @@ public class SuperInstaMine extends Module {
             }
         }
 
-        // Only swap if we found a better tool AND it's better than current
         if (bestSlot != -1 && bestScore > currentScore) {
             InvUtils.swap(bestSlot, true);
         }
@@ -290,14 +324,13 @@ public class SuperInstaMine extends Module {
     private void onRender(Render3DEvent event) {
         if (!render.get()) return;
 
-        // Render Optimization for Low End PC
-        if (range.get() == 0) {
-            // Single Mode Render
+        if (!areaModeActive) {
+            // Render Single
              if (singleTargetPos.getY() != -128 && BlockUtils.canBreak(singleTargetPos)) {
                  event.renderer.box(singleTargetPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
              }
         } else {
-            // Area Mode Render
+            // Render Area (Yang jenisnya sama saja)
             for (BlockPos pos : areaTargets) {
                 if (BlockUtils.canBreak(pos)) {
                     event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
