@@ -55,8 +55,8 @@ public class SuperInstaMine extends Module {
 
     private final Setting<Integer> maxRange = sgGeneral.add(new IntSetting.Builder()
             .name("Max Range")
-            .description("The radius used when Area Mode is ACTIVE.")
-            .defaultValue(5) // Default 5 biar ga terlalu berat
+            .description("Radius search from the ORIGIN block.")
+            .defaultValue(5)
             .min(1)
             .sliderMax(7)
             .build());
@@ -138,11 +138,15 @@ public class SuperInstaMine extends Module {
     private Direction breakDirection;
     
     // Status Toggle
-    private boolean areaModeActive = false; // Default mati (Single Mode)
+    private boolean areaModeActive = false;
     private boolean wasTogglePressed = false;
+    
+    // FIXED: Konstanta jarak aman (6 blok dari mata pemain)
+    // 6 * 6 = 36. Kita kasih toleransi sedikit jadi 36-38.
+    private static final double MAX_PLAYER_REACH_SQUARED = 36.0; 
 
     public SuperInstaMine() {
-        super(Trouser.Main, "SuperInstaMine", "Use Toggle Key to switch between Single/Area.");
+        super(Trouser.Main, "SuperInstaMine", "Fixed Range Bug & Infinite Swing.");
     }
 
     @Override
@@ -152,7 +156,7 @@ public class SuperInstaMine extends Module {
         originBlockType = null;
         areaTargets.clear();
         singleTargetPos.set(0, -128, 0);
-        areaModeActive = false; // Reset ke single setiap kali module dinyalakan
+        areaModeActive = false;
     }
 
     @EventHandler
@@ -163,13 +167,14 @@ public class SuperInstaMine extends Module {
         BlockState clickedState = mc.world.getBlockState(event.blockPos);
         
         if (!areaModeActive) {
-            // Mode Single
             singleTargetPos.set(event.blockPos);
             originPos = null;
         } else {
-            // Mode Area
             originPos = event.blockPos;
             originBlockType = clickedState.getBlock();
+            
+            // Fix: Langsung hitung area saat klik pertama biar responsif
+            calculateAreaTargets(); 
         }
     }
 
@@ -183,12 +188,10 @@ public class SuperInstaMine extends Module {
                 areaModeActive = !areaModeActive;
                 wasTogglePressed = true;
                 
-                // Notifikasi Chat Kecil
                 String status = areaModeActive ? "AREA (Range " + maxRange.get() + ")" : "SINGLE (Range 0)";
                 Formatting color = areaModeActive ? Formatting.GREEN : Formatting.YELLOW;
                 ChatUtils.sendMsg(Text.literal("SuperInstaMine: ").append(Text.literal(status).formatted(color)));
                 
-                // Reset targets saat ganti mode biar bersih
                 originPos = null;
                 singleTargetPos.set(0, -128, 0);
             }
@@ -199,9 +202,11 @@ public class SuperInstaMine extends Module {
         if (ticks >= tickDelay.get()) {
             ticks = 0;
             
-            // --- MODE 1: SINGLE BLOCK (Hemat Resource) ---
+            // --- MODE 1: SINGLE BLOCK ---
             if (!areaModeActive) {
                 if (singleTargetPos.getY() == -128) return;
+                // Fix: Cek jarak player juga untuk single block biar ga swing hantu
+                if (mc.player.squaredDistanceTo(singleTargetPos.toCenterPos()) > MAX_PLAYER_REACH_SQUARED) return;
                 performMining(singleTargetPos);
             } 
             
@@ -209,12 +214,15 @@ public class SuperInstaMine extends Module {
             else {
                 if (originPos == null || originBlockType == null) return;
                 
-                if (mc.player.squaredDistanceTo(originPos.toCenterPos()) > 64) { 
-                    originPos = null;
+                // Recalculate setiap tick (atau beberapa tick sekali) jika player bergerak
+                // Ini penting agar daftar target selalu valid terhadap posisi player
+                calculateAreaTargets(); 
+                
+                if (areaTargets.isEmpty()) {
+                    originPos = null; // Stop jika tidak ada target valid
                     return;
                 }
-                
-                calculateAreaTargets();
+
                 for (BlockPos pos : areaTargets) {
                     performMining(pos);
                 }
@@ -225,19 +233,19 @@ public class SuperInstaMine extends Module {
         }
     }
 
-    // --- Mining Logic ---
     private void performMining(BlockPos pos) {
         if (mc.world.isOutOfHeightLimit(pos) || !BlockUtils.canBreak(pos)) return;
 
         BlockState state = mc.world.getBlockState(pos);
         if (!shouldMine(state)) return;
 
-        // Logic Area: Pastikan jenis blok sama
         if (areaModeActive && originBlockType != null) {
             if (state.getBlock() != originBlockType) return;
         }
+        
+        // FIX FINAL: Double Check jarak pemain sebelum kirim paket
+        if (mc.player.squaredDistanceTo(pos.toCenterPos()) > MAX_PLAYER_REACH_SQUARED) return;
 
-        // AutoTool Logic
         if (useAutoTool.get() && Modules.get().isActive(AutoTool.class)) {
             equipBestTool(state);
         }
@@ -257,17 +265,20 @@ public class SuperInstaMine extends Module {
         }
     }
 
-    // --- Area Calculation ---
     private void calculateAreaTargets() {
         areaTargets.clear();
-        areaTargets.add(originPos);
+        if (originPos == null) return;
 
-        int r = maxRange.get(); // Pakai setting Max Range
+        int r = maxRange.get();
+        
+        // FIX LOGIC:
+        // Area pencarian tetap dari Origin Block (agar satu pohon kena semua)
+        // TAPI... kita filter hasilnya berdasarkan jarak ke PLAYER.
         
         float pitch = mc.player.getPitch();
         boolean isVertical = (aorient.get() && (pitch > 30 || pitch < -30)) || (!aorient.get() && directionMode.get() == DirectionMode.Vertical);
 
-        for (int i = 1; i <= r; i++) {
+        for (int i = 0; i <= r; i++) { // Start dari 0 (termasuk origin)
              for (int x = -i; x <= i; x++) {
                 for (int y = -i; y <= i; y++) {
                     for (int z = -i; z <= i; z++) {
@@ -275,7 +286,11 @@ public class SuperInstaMine extends Module {
                         
                         BlockPos target = originPos.add(x, y, z);
                         
-                        // Cek jenis blok sebelum dimasukkan ke list
+                        // FIX UTAMA DISINI:
+                        // Cek jarak target ke PEMAIN. Kalau > 6 blok, JANGAN dimasukkan ke target.
+                        // Ini yang mencegah "pohon nyasar" yang jauh dari jangkauan tangan.
+                        if (mc.player.squaredDistanceTo(target.toCenterPos()) > MAX_PLAYER_REACH_SQUARED) continue;
+
                         BlockState targetState = mc.world.getBlockState(target);
                         if (targetState.getBlock() == originBlockType) {
                             if (!areaTargets.contains(target)) areaTargets.add(target);
@@ -286,7 +301,6 @@ public class SuperInstaMine extends Module {
         }
     }
     
-    // --- Helper: AutoTool ---
     private void equipBestTool(BlockState state) {
         int bestSlot = -1;
         double bestScore = -1;
@@ -325,12 +339,13 @@ public class SuperInstaMine extends Module {
         if (!render.get()) return;
 
         if (!areaModeActive) {
-            // Render Single
              if (singleTargetPos.getY() != -128 && BlockUtils.canBreak(singleTargetPos)) {
-                 event.renderer.box(singleTargetPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+                 // Render single juga dicek jaraknya biar ga ngerender merah di kejauhan
+                 if (mc.player.squaredDistanceTo(singleTargetPos.toCenterPos()) <= MAX_PLAYER_REACH_SQUARED) {
+                     event.renderer.box(singleTargetPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+                 }
              }
         } else {
-            // Render Area (Yang jenisnya sama saja)
             for (BlockPos pos : areaTargets) {
                 if (BlockUtils.canBreak(pos)) {
                     event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
