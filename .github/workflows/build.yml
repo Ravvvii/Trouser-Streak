@@ -1,0 +1,52 @@
+name: Build 3Trouser Streak
+
+# Konfigurasi agar jika Anda push 2x cepat, build lama dibatalkan (hemat resource)
+concurrency:
+  group: "build-${{ github.ref }}"
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - "1.21.4"  # <-- Sesuai request: Branch utama Anda
+    paths:
+      - "**"      # <-- Trigger pada perubahan file apapun (termasuk .java)
+  
+  # Trigger Manual (Tombol di Actions)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Setup Java 21 (Wajib untuk MC 1.21.4)
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # Setup Gradle (Otomatis handle caching & wrapper)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Proses Build
+      # Gradle otomatis membaca 'gradle.properties' Anda
+      # Output file akan menjadi: 3trouser-streak-1.5.2-1.21.4.jar
+      - name: Build with Gradle
+        run: ./gradlew build
+
+      # Upload Hasil Build (Artifact)
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          # Nama file ZIP saat didownload di GitHub Actions
+          name: 3trouser-streak-1.5.2-1.21.4
+          # Mengambil file jar hasil build (mengabaikan file -sources.jar jika ada)
+          path: build/libs/*.jar
+          # Disimpan selama 1 hari sesuai request
+          retention-days: 1
