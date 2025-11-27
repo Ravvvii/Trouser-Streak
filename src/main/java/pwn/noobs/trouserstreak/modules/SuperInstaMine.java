@@ -17,6 +17,7 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
@@ -27,8 +28,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import pwn.noobs.trouserstreak.Trouser;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class SuperInstaMine extends Module {
 
@@ -44,7 +45,7 @@ public class SuperInstaMine extends Module {
 
     private final Setting<List<Block>> skippableBlox = sgGeneral.add(new BlockListSetting.Builder()
             .name("Blocks to Skip")
-            .description("Safety: Never mine these blocks (even if targeted).")
+            .description("Safety: Never mine these blocks.")
             .visible(() -> listMode.get() == ListModes.Blacklist)
             .build());
 
@@ -55,30 +56,32 @@ public class SuperInstaMine extends Module {
             .build());
 
     private final Setting<Integer> maxRange = sgGeneral.add(new IntSetting.Builder()
-            .name("Max Range")
-            .description("Radius search from the ORIGIN block.")
-            .defaultValue(5)
-            .min(1)
+            .name("Range")
+            .description("0 = Manual Queue (Infinite). >0 = Auto Area.")
+            .defaultValue(0)
+            .min(0)
             .sliderMax(7)
             .build());
 
     private final Setting<Keybind> toggleKey = sgGeneral.add(new KeybindSetting.Builder()
-            .name("Toggle Area Key")
-            .description("Key to switch between Single Mode (Range 0) and Area Mode.")
+            .name("Area Toggle Key")
+            .description("Turn ON to enable Area Calculation (If Range > 0).")
             .defaultValue(Keybind.none())
+            .visible(() -> maxRange.get() > 0)
             .build());
 
     private final Setting<Boolean> aorient = sgGeneral.add(new BoolSetting.Builder()
             .name("Auto Orient")
             .description("Automatically orients the breaking area based on your pitch.")
             .defaultValue(true)
+            .visible(() -> maxRange.get() > 0)
             .build());
 
     private final Setting<DirectionMode> directionMode = sgGeneral.add(new EnumSetting.Builder<DirectionMode>()
             .name("Direction Mode")
             .description("Forcing vertical or horizontal break.")
             .defaultValue(DirectionMode.Vertical)
-            .visible(() -> !aorient.get())
+            .visible(() -> !aorient.get() && maxRange.get() > 0)
             .build());
 
     private final Setting<Integer> tickDelay = sgGeneral.add(new IntSetting.Builder()
@@ -95,11 +98,10 @@ public class SuperInstaMine extends Module {
             .defaultValue(true)
             .build());
 
-    // UBAHAN DISINI: Mengganti Boolean menjadi Enum Mode
     private final Setting<SwingMode> swingMode = sgGeneral.add(new EnumSetting.Builder<SwingMode>()
             .name("Swing Mode")
             .description("Client: Visual+Packet. Server: Packet Only (Invisible).")
-            .defaultValue(SwingMode.Server) // Default Server sesuai request Anda
+            .defaultValue(SwingMode.Server)
             .build());
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
@@ -133,30 +135,23 @@ public class SuperInstaMine extends Module {
 
     // --- Variables ---
     private int ticks;
-    private final BlockPos.Mutable singleTargetPos = new BlockPos.Mutable(0, -128, 0);
-    private final List<BlockPos> areaTargets = new ArrayList<>();
-    private BlockPos originPos = null;
-    private Block originBlockType = null;
+    private final List<BlockPos> miningQueue = new CopyOnWriteArrayList<>();
     private Direction breakDirection;
     
-    // Status Toggle
-    private boolean areaModeActive = false;
+    private boolean areaModeEnabled = true; 
     private boolean wasTogglePressed = false;
     
     private static final double MAX_PLAYER_REACH_SQUARED = 36.0; 
 
     public SuperInstaMine() {
-        super(Trouser.Main, "SuperInstaMine", "Fixed Range, Swing Modes & AutoTool.");
+        super(Trouser.Main, "SuperInstaMine", "Fixed Multi-Block Queue Logic.");
     }
 
     @Override
     public void onActivate() {
         ticks = 0;
-        originPos = null;
-        originBlockType = null;
-        areaTargets.clear();
-        singleTargetPos.set(0, -128, 0);
-        areaModeActive = false;
+        miningQueue.clear();
+        areaModeEnabled = true; 
     }
 
     @EventHandler
@@ -164,15 +159,17 @@ public class SuperInstaMine extends Module {
         if (mc.player == null || mc.world == null) return;
         
         breakDirection = event.direction;
-        BlockState clickedState = mc.world.getBlockState(event.blockPos);
         
-        if (!areaModeActive) {
-            singleTargetPos.set(event.blockPos);
-            originPos = null;
-        } else {
-            originPos = event.blockPos;
-            originBlockType = clickedState.getBlock();
-            calculateAreaTargets(); 
+        // PERBAIKAN UTAMA: Gunakan .toImmutable()
+        // Ini memastikan koordinat yang disimpan "dikunci" dan tidak berubah saat kursor geser.
+        BlockPos immutablePos = event.blockPos.toImmutable();
+        
+        // 1. Tambahkan ke antrian (Manual)
+        addBlockToQueue(immutablePos);
+
+        // 2. Logic Area (Hanya jika Range > 0)
+        if (maxRange.get() > 0 && areaModeEnabled) {
+            calculateAndAddNeighbors(immutablePos);
         }
     }
 
@@ -181,17 +178,14 @@ public class SuperInstaMine extends Module {
         if (mc.player == null || mc.world == null) return;
 
         // --- Logic Keybind Toggle ---
-        if (toggleKey.get().isPressed()) {
+        if (maxRange.get() > 0 && toggleKey.get().isPressed()) {
             if (!wasTogglePressed) {
-                areaModeActive = !areaModeActive;
+                areaModeEnabled = !areaModeEnabled;
                 wasTogglePressed = true;
                 
-                String status = areaModeActive ? "AREA (Range " + maxRange.get() + ")" : "SINGLE (Range 0)";
-                Formatting color = areaModeActive ? Formatting.GREEN : Formatting.YELLOW;
+                String status = areaModeEnabled ? "AREA ON" : "AREA OFF (Manual Only)";
+                Formatting color = areaModeEnabled ? Formatting.GREEN : Formatting.RED;
                 ChatUtils.sendMsg(Text.literal("SuperInstaMine: ").append(Text.literal(status).formatted(color)));
-                
-                originPos = null;
-                singleTargetPos.set(0, -128, 0);
             }
         } else {
             wasTogglePressed = false;
@@ -200,27 +194,20 @@ public class SuperInstaMine extends Module {
         if (ticks >= tickDelay.get()) {
             ticks = 0;
             
-            // --- MODE 1: SINGLE BLOCK ---
-            if (!areaModeActive) {
-                if (singleTargetPos.getY() == -128) return;
-                if (mc.player.squaredDistanceTo(singleTargetPos.toCenterPos()) > MAX_PLAYER_REACH_SQUARED) return;
-                performMining(singleTargetPos);
-            } 
-            
-            // --- MODE 2: AREA MODE ---
-            else {
-                if (originPos == null || originBlockType == null) return;
-                
-                calculateAreaTargets(); 
-                
-                if (areaTargets.isEmpty()) {
-                    originPos = null;
-                    return;
-                }
+            // Bersihkan antrian hanya jika blok benar-benar hancur (AIR)
+            miningQueue.removeIf(pos -> {
+                // Hapus jika blok sudah jadi udara
+                if (!BlockUtils.canBreak(pos) || mc.world.getBlockState(pos).getBlock() == Blocks.AIR) return true;
+                // Hapus jika kejauhan
+                if (mc.player.squaredDistanceTo(pos.toCenterPos()) > MAX_PLAYER_REACH_SQUARED) return true;
+                // Hapus jika blok masuk blacklist setting
+                if (!shouldMine(mc.world.getBlockState(pos))) return true;
+                return false;
+            });
 
-                for (BlockPos pos : areaTargets) {
-                    performMining(pos);
-                }
+            // Eksekusi Mining untuk SEMUA blok di antrian
+            for (BlockPos pos : miningQueue) {
+                performMining(pos);
             }
             
         } else {
@@ -228,55 +215,19 @@ public class SuperInstaMine extends Module {
         }
     }
 
-    private void performMining(BlockPos pos) {
-        if (mc.world.isOutOfHeightLimit(pos) || !BlockUtils.canBreak(pos)) return;
-
-        BlockState state = mc.world.getBlockState(pos);
-        if (!shouldMine(state)) return;
-
-        if (areaModeActive && originBlockType != null) {
-            if (state.getBlock() != originBlockType) return;
-        }
-        
-        if (mc.player.squaredDistanceTo(pos.toCenterPos()) > MAX_PLAYER_REACH_SQUARED) return;
-
-        if (useAutoTool.get() && Modules.get().isActive(AutoTool.class)) {
-            equipBestTool(state);
-        }
-
-        Runnable miningAction = () -> {
-            Direction dir = breakDirection == null ? Direction.UP : breakDirection;
-            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, dir));
-            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir));
-            
-            // --- LOGIKA SWING BARU ---
-            switch (swingMode.get()) {
-                case Client:
-                    // Visual (Tangan gerak) + Packet (Dikirim ke server)
-                    mc.player.swingHand(Hand.MAIN_HAND);
-                    break;
-                case Server:
-                    // Packet Only (Dikirim ke server) - Tangan Anda DIAM di layar (Tidak bikin pusing)
-                    mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
-                    break;
-                case None:
-                    // Tidak ada swing sama sekali
-                    break;
-            }
-        };
-
-        if (rotate.get()) {
-            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), miningAction);
-        } else {
-            miningAction.run();
+    private void addBlockToQueue(BlockPos pos) {
+        // Pastikan pos belum ada di antrian (cegah duplikat)
+        if (!miningQueue.contains(pos) && mc.player.squaredDistanceTo(pos.toCenterPos()) <= MAX_PLAYER_REACH_SQUARED) {
+            miningQueue.add(pos);
         }
     }
 
-    private void calculateAreaTargets() {
-        areaTargets.clear();
-        if (originPos == null) return;
-
+    private void calculateAndAddNeighbors(BlockPos originPos) {
         int r = maxRange.get();
+        if (r == 0) return;
+
+        Block originBlockType = mc.world.getBlockState(originPos).getBlock();
+        
         float pitch = mc.player.getPitch();
         boolean isVertical = (aorient.get() && (pitch > 30 || pitch < -30)) || (!aorient.get() && directionMode.get() == DirectionMode.Vertical);
 
@@ -286,17 +237,42 @@ public class SuperInstaMine extends Module {
                     for (int z = -i; z <= i; z++) {
                         if (Math.abs(x) > i || Math.abs(y) > i || Math.abs(z) > i) continue;
                         
-                        BlockPos target = originPos.add(x, y, z);
+                        // Gunakan toImmutable juga disini untuk keamanan ekstra
+                        BlockPos target = originPos.add(x, y, z).toImmutable();
                         
                         if (mc.player.squaredDistanceTo(target.toCenterPos()) > MAX_PLAYER_REACH_SQUARED) continue;
 
-                        BlockState targetState = mc.world.getBlockState(target);
-                        if (targetState.getBlock() == originBlockType) {
-                            if (!areaTargets.contains(target)) areaTargets.add(target);
+                        if (mc.world.getBlockState(target).getBlock() == originBlockType) {
+                            addBlockToQueue(target);
                         }
                     }
                 }
              }
+        }
+    }
+
+    private void performMining(BlockPos pos) {
+        BlockState state = mc.world.getBlockState(pos);
+        
+        if (useAutoTool.get() && Modules.get().isActive(AutoTool.class)) {
+            equipBestTool(state);
+        }
+
+        Runnable miningAction = () -> {
+            Direction dir = breakDirection == null ? Direction.UP : breakDirection;
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, dir));
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir));
+            
+            switch (swingMode.get()) {
+                case Client: mc.player.swingHand(Hand.MAIN_HAND); break;
+                case Server: mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND)); break;
+            }
+        };
+
+        if (rotate.get()) {
+            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), miningAction);
+        } else {
+            miningAction.run();
         }
     }
     
@@ -337,17 +313,9 @@ public class SuperInstaMine extends Module {
     private void onRender(Render3DEvent event) {
         if (!render.get()) return;
 
-        if (!areaModeActive) {
-             if (singleTargetPos.getY() != -128 && BlockUtils.canBreak(singleTargetPos)) {
-                 if (mc.player.squaredDistanceTo(singleTargetPos.toCenterPos()) <= MAX_PLAYER_REACH_SQUARED) {
-                     event.renderer.box(singleTargetPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
-                 }
-             }
-        } else {
-            for (BlockPos pos : areaTargets) {
-                if (BlockUtils.canBreak(pos)) {
-                    event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
-                }
+        for (BlockPos pos : miningQueue) {
+            if (BlockUtils.canBreak(pos)) {
+                event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
             }
         }
     }
