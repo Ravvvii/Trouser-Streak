@@ -492,4 +492,3 @@ public class SuperInstaMine extends Module {
         whitelist, blacklist
     }
 }
-``` 🚀
