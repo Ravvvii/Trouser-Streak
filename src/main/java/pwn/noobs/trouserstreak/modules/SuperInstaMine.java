@@ -12,9 +12,7 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.item.ShearsItem;
+import net.minecraft.item.*;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.registry.tag.ItemTags;
@@ -28,10 +26,11 @@ import java.util.List;
 public class SuperInstaMine extends Module {
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgTools = settings.createGroup("Allowed Tools");
     private final SettingGroup sgRender = settings.createGroup("Render");
     private final SettingGroup sgAutoTool = settings.createGroup("AutoTool");
 
-    // General Settings
+    // --- General Settings ---
     private final Setting<listModes> listmode = sgGeneral.add(new EnumSetting.Builder<listModes>()
             .name("List Mode")
             .description("Whether to break or not break the block list.")
@@ -80,15 +79,9 @@ public class SuperInstaMine extends Module {
             .sliderMax(20)
             .build());
 
-    private final Setting<Boolean> pick = sgGeneral.add(new BoolSetting.Builder()
-            .name("only-pick")
-            .description("Only tries to mine the block if you are holding a pickaxe.")
-            .defaultValue(false)
-            .build());
-
     private final Setting<Boolean> pauseOnUse = sgGeneral.add(new BoolSetting.Builder()
             .name("pause-on-use")
-            .description("Pauses mining while eating or drinking.")
+            .description("Pauses mining while eating, drinking, or using items.")
             .defaultValue(true)
             .build());
 
@@ -104,7 +97,44 @@ public class SuperInstaMine extends Module {
             .defaultValue(true)
             .build());
 
-    // AutoTool Settings (FITUR BARU)
+    // --- Allowed Tools Settings ---
+    private final Setting<Boolean> allowHand = sgTools.add(new BoolSetting.Builder()
+            .name("allow-hand")
+            .description("Allow mining with empty hand.")
+            .defaultValue(true)
+            .build());
+
+    private final Setting<Boolean> allowPickaxe = sgTools.add(new BoolSetting.Builder()
+            .name("allow-pickaxes")
+            .description("Allow mining with Pickaxes.")
+            .defaultValue(true)
+            .build());
+
+    private final Setting<Boolean> allowAxe = sgTools.add(new BoolSetting.Builder()
+            .name("allow-axes")
+            .description("Allow mining with Axes.")
+            .defaultValue(true)
+            .build());
+
+    private final Setting<Boolean> allowShovel = sgTools.add(new BoolSetting.Builder()
+            .name("allow-shovels")
+            .description("Allow mining with Shovels.")
+            .defaultValue(true)
+            .build());
+
+    private final Setting<Boolean> allowShears = sgTools.add(new BoolSetting.Builder()
+            .name("allow-shears")
+            .description("Allow mining with Shears.")
+            .defaultValue(true)
+            .build());
+
+    private final Setting<Boolean> allowHoe = sgTools.add(new BoolSetting.Builder()
+            .name("allow-hoes")
+            .description("Allow mining with Hoes.")
+            .defaultValue(true)
+            .build());
+
+    // --- AutoTool Settings ---
     private final Setting<Boolean> autoTool = sgAutoTool.add(new BoolSetting.Builder()
             .name("auto-tool")
             .description("Automatically swaps to the best tool.")
@@ -118,7 +148,7 @@ public class SuperInstaMine extends Module {
             .visible(autoTool::get)
             .build());
 
-    // Render Settings
+    // --- Render Settings ---
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
             .name("render")
             .description("Renders a block overlay on the block being broken.")
@@ -144,17 +174,13 @@ public class SuperInstaMine extends Module {
             .build());
 
     private int ticks;
-
-    // Defines BlockPos Mutables
     private final BlockPos.Mutable[] bPos = new BlockPos.Mutable[27];
-
     private Direction direction;
     private Direction playermovingdirection;
     private int playerpitch;
 
     public SuperInstaMine() {
-        super(Trouser.Main, "SuperInstaMine", "Attempts to instantly mine blocks. Modified to be able to break many blocks at a time.");
-        // Initialize block positions to avoid NPE
+        super(Trouser.Main, "SuperInstaMine", "Attempts to instantly mine blocks. Only works with specific valid tools.");
         for (int i = 0; i < bPos.length; i++) {
             bPos[i] = new BlockPos.Mutable(0, -128, 0);
         }
@@ -175,11 +201,8 @@ public class SuperInstaMine extends Module {
         playermovingdirection = mc.player.getMovementDirection();
         playerpitch = Math.round(mc.player.getPitch());
         
-        // Mapping positions exactly like original to preserve logic
-        // Center
+        // Mapping Logic
         bPos[0].set(event.blockPos);
-        
-        // Middle layer 3x3x3
         bPos[1].set(event.blockPos.getX() + 1, event.blockPos.getY(), event.blockPos.getZ());
         bPos[2].set(event.blockPos.getX() - 1, event.blockPos.getY(), event.blockPos.getZ());
         bPos[3].set(event.blockPos.getX(), event.blockPos.getY(), event.blockPos.getZ() + 1);
@@ -188,8 +211,6 @@ public class SuperInstaMine extends Module {
         bPos[6].set(event.blockPos.getX() - 1, event.blockPos.getY(), event.blockPos.getZ() - 1);
         bPos[7].set(event.blockPos.getX() + 1, event.blockPos.getY(), event.blockPos.getZ() - 1);
         bPos[8].set(event.blockPos.getX() - 1, event.blockPos.getY(), event.blockPos.getZ() + 1);
-        
-        // Top layer 3x3x3
         bPos[9].set(event.blockPos.getX(), event.blockPos.getY() + 1, event.blockPos.getZ());
         bPos[10].set(event.blockPos.getX() + 1, event.blockPos.getY() + 1, event.blockPos.getZ());
         bPos[11].set(event.blockPos.getX() - 1, event.blockPos.getY() + 1, event.blockPos.getZ());
@@ -199,8 +220,6 @@ public class SuperInstaMine extends Module {
         bPos[15].set(event.blockPos.getX() - 1, event.blockPos.getY() + 1, event.blockPos.getZ() - 1);
         bPos[16].set(event.blockPos.getX() + 1, event.blockPos.getY() + 1, event.blockPos.getZ() - 1);
         bPos[17].set(event.blockPos.getX() - 1, event.blockPos.getY() + 1, event.blockPos.getZ() + 1);
-        
-        // Bottom layer 3x3
         bPos[18].set(event.blockPos.getX(), event.blockPos.getY() - 1, event.blockPos.getZ());
         bPos[19].set(event.blockPos.getX() + 1, event.blockPos.getY() - 1, event.blockPos.getZ());
         bPos[20].set(event.blockPos.getX() - 1, event.blockPos.getY() - 1, event.blockPos.getZ());
@@ -210,10 +229,6 @@ public class SuperInstaMine extends Module {
         bPos[24].set(event.blockPos.getX() - 1, event.blockPos.getY() - 1, event.blockPos.getZ() - 1);
         bPos[25].set(event.blockPos.getX() + 1, event.blockPos.getY() - 1, event.blockPos.getZ() - 1);
         bPos[26].set(event.blockPos.getX() - 1, event.blockPos.getY() - 1, event.blockPos.getZ() + 1);
-    }
-
-    public static boolean isTool(ItemStack itemStack) {
-        return itemStack.isIn(ItemTags.AXES) || itemStack.isIn(ItemTags.HOES) || itemStack.isIn(ItemTags.PICKAXES) || itemStack.isIn(ItemTags.SHOVELS) || itemStack.getItem() instanceof ShearsItem;
     }
 
     @EventHandler
@@ -234,17 +249,25 @@ public class SuperInstaMine extends Module {
         executeRenderLogic(event);
     }
 
-    // --- Core Logic Refactored ---
-    // This looks at the logic from the original file and executes 'action' (Mine or Render)
-    // Preservation of logic: The nested if statements and loops are flattened but follow the same condition path.
+    // --- NEW STRICT TOOL CHECKER (Includes Hand) ---
+    private boolean isAllowedTool(ItemStack itemStack) {
+        // Jika tangan kosong, cek setting allowHand
+        if (itemStack.isEmpty()) return allowHand.get();
+
+        // Check if item is configured in settings AND matches the tag
+        if (allowPickaxe.get() && itemStack.isIn(ItemTags.PICKAXES)) return true;
+        if (allowAxe.get() && itemStack.isIn(ItemTags.AXES)) return true;
+        if (allowShovel.get() && itemStack.isIn(ItemTags.SHOVELS)) return true;
+        if (allowHoe.get() && itemStack.isIn(ItemTags.HOES)) return true;
+        if (allowShears.get() && itemStack.getItem() instanceof ShearsItem) return true;
+
+        // Swords/Others will return false here
+        return false;
+    }
 
     private void executeMiningLogic() {
         int r = range.get();
-        // Range -1 to 7 logic preservation
-        
-        // Base logic (Always checks center)
         tryMine(bPos[0]);
-
         if (r == -1) {
             switch (playermovingdirection) {
                 case NORTH -> tryMine(bPos[2]);
@@ -253,11 +276,6 @@ public class SuperInstaMine extends Module {
                 case WEST -> tryMine(bPos[3]);
             }
         }
-
-        if (r >= 0 && r <= 7) {
-            // Range 0 only does bPos[0] which is already done above.
-        }
-
         if (r >= 1) {
              switch (playermovingdirection) {
                 case NORTH -> tryMine(bPos[1]);
@@ -266,87 +284,36 @@ public class SuperInstaMine extends Module {
                 case WEST -> tryMine(bPos[4]);
             }
         }
-
         if (r >= 2) {
-            if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) {
-                tryMine(bPos[2]);
-                tryMine(bPos[1]);
-            }
-            if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) {
-                tryMine(bPos[4]);
-                tryMine(bPos[3]);
-            }
+            if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) { tryMine(bPos[2]); tryMine(bPos[1]); }
+            if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) { tryMine(bPos[4]); tryMine(bPos[3]); }
         }
-
         if (r >= 3) {
             boolean vert = (aorient.get() && playerpitch <= 30 && playerpitch >= -30) || (mode.get() == Modes.Vertical && !aorient.get());
             boolean horiz = (aorient.get() && (playerpitch > 30 || playerpitch < -30)) || (mode.get() == Modes.Horizontal && !aorient.get());
-
             if (vert) {
-                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) {
-                    tryMine(bPos[2]);
-                    tryMine(bPos[1]);
-                    tryMine(bPos[9]);
-                    tryMine(bPos[18]);
-                }
-                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) {
-                    tryMine(bPos[4]);
-                    tryMine(bPos[3]);
-                    tryMine(bPos[9]);
-                    tryMine(bPos[18]);
-                }
+                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) { tryMine(bPos[2]); tryMine(bPos[1]); tryMine(bPos[9]); tryMine(bPos[18]); }
+                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) { tryMine(bPos[4]); tryMine(bPos[3]); tryMine(bPos[9]); tryMine(bPos[18]); }
             }
-            if (horiz) {
-                tryMine(bPos[1]);
-                tryMine(bPos[2]);
-                tryMine(bPos[3]);
-                tryMine(bPos[4]);
-            }
+            if (horiz) { tryMine(bPos[1]); tryMine(bPos[2]); tryMine(bPos[3]); tryMine(bPos[4]); }
         }
-        
         if (r >= 4) {
              boolean vert = (aorient.get() && playerpitch <= 30 && playerpitch >= -30) || (mode.get() == Modes.Vertical && !aorient.get());
              boolean horiz = (aorient.get() && (playerpitch > 30 || playerpitch < -30)) || (mode.get() == Modes.Horizontal && !aorient.get());
-
              if (vert) {
-                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) {
-                    tryMine(bPos[2]); tryMine(bPos[1]); tryMine(bPos[9]); tryMine(bPos[18]);
-                    tryMine(bPos[10]); tryMine(bPos[11]); tryMine(bPos[19]); tryMine(bPos[20]);
-                }
-                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) {
-                    tryMine(bPos[4]); tryMine(bPos[3]); tryMine(bPos[9]); tryMine(bPos[18]);
-                    tryMine(bPos[12]); tryMine(bPos[13]); tryMine(bPos[21]); tryMine(bPos[22]);
-                }
+                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) { tryMine(bPos[2]); tryMine(bPos[1]); tryMine(bPos[9]); tryMine(bPos[18]); tryMine(bPos[10]); tryMine(bPos[11]); tryMine(bPos[19]); tryMine(bPos[20]); }
+                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) { tryMine(bPos[4]); tryMine(bPos[3]); tryMine(bPos[9]); tryMine(bPos[18]); tryMine(bPos[12]); tryMine(bPos[13]); tryMine(bPos[21]); tryMine(bPos[22]); }
              }
-             if (horiz) {
-                 for(int i=1; i<=8; i++) tryMine(bPos[i]);
-             }
+             if (horiz) { for(int i=1; i<=8; i++) tryMine(bPos[i]); }
         }
-
-        if (r >= 5) {
-            // Range 5 iterates 1 to 9 and 18
-            for(int i=1; i<=9; i++) tryMine(bPos[i]);
-            tryMine(bPos[18]);
-        }
-
-        if (r >= 6) {
-            // Range 6 iterates 1 to 22
-            for(int i=1; i<=22; i++) tryMine(bPos[i]);
-        }
-
-        if (r == 7) {
-            // Range 7 iterates 1 to 26
-            for(int i=1; i<=26; i++) tryMine(bPos[i]);
-        }
+        if (r >= 5) { for(int i=1; i<=9; i++) tryMine(bPos[i]); tryMine(bPos[18]); }
+        if (r >= 6) { for(int i=1; i<=22; i++) tryMine(bPos[i]); }
+        if (r == 7) { for(int i=1; i<=26; i++) tryMine(bPos[i]); }
     }
 
     private void executeRenderLogic(Render3DEvent event) {
-        // Reuse the exact same logic structure but call rendering
-        // This duplication of structure is necessary to ensure Render matches Break exactly based on settings
         int r = range.get();
-        
-        tryRender(bPos[0], event); // Base
-
+        tryRender(bPos[0], event);
         if (r == -1) {
             switch (playermovingdirection) {
                 case NORTH -> tryRender(bPos[2], event);
@@ -355,7 +322,6 @@ public class SuperInstaMine extends Module {
                 case WEST -> tryRender(bPos[3], event);
             }
         }
-        
         if (r >= 1) {
              switch (playermovingdirection) {
                 case NORTH -> tryRender(bPos[1], event);
@@ -364,65 +330,32 @@ public class SuperInstaMine extends Module {
                 case WEST -> tryRender(bPos[4], event);
             }
         }
-
         if (r >= 2) {
-            if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) {
-                tryRender(bPos[2], event); tryRender(bPos[1], event);
-            }
-            if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) {
-                tryRender(bPos[4], event); tryRender(bPos[3], event);
-            }
+            if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) { tryRender(bPos[2], event); tryRender(bPos[1], event); }
+            if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) { tryRender(bPos[4], event); tryRender(bPos[3], event); }
         }
-        
         if (r >= 3) {
             boolean vert = (aorient.get() && playerpitch <= 30 && playerpitch >= -30) || (mode.get() == Modes.Vertical && !aorient.get());
             boolean horiz = (aorient.get() && (playerpitch > 30 || playerpitch < -30)) || (mode.get() == Modes.Horizontal && !aorient.get());
-
              if (vert) {
-                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) {
-                    tryRender(bPos[2], event); tryRender(bPos[1], event); tryRender(bPos[9], event); tryRender(bPos[18], event);
-                }
-                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) {
-                    tryRender(bPos[4], event); tryRender(bPos[3], event); tryRender(bPos[9], event); tryRender(bPos[18], event);
-                }
+                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) { tryRender(bPos[2], event); tryRender(bPos[1], event); tryRender(bPos[9], event); tryRender(bPos[18], event); }
+                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) { tryRender(bPos[4], event); tryRender(bPos[3], event); tryRender(bPos[9], event); tryRender(bPos[18], event); }
             }
-            if (horiz) {
-                tryRender(bPos[1], event); tryRender(bPos[2], event); tryRender(bPos[3], event); tryRender(bPos[4], event);
-            }
+            if (horiz) { tryRender(bPos[1], event); tryRender(bPos[2], event); tryRender(bPos[3], event); tryRender(bPos[4], event); }
         }
-        
         if (r >= 4) {
              boolean vert = (aorient.get() && playerpitch <= 30 && playerpitch >= -30) || (mode.get() == Modes.Vertical && !aorient.get());
              boolean horiz = (aorient.get() && (playerpitch > 30 || playerpitch < -30)) || (mode.get() == Modes.Horizontal && !aorient.get());
-
              if (vert) {
-                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) {
-                    tryRender(bPos[2], event); tryRender(bPos[1], event); tryRender(bPos[9], event); tryRender(bPos[18], event);
-                    tryRender(bPos[10], event); tryRender(bPos[11], event); tryRender(bPos[19], event); tryRender(bPos[20], event);
-                }
-                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) {
-                    tryRender(bPos[4], event); tryRender(bPos[3], event); tryRender(bPos[9], event); tryRender(bPos[18], event);
-                    tryRender(bPos[12], event); tryRender(bPos[13], event); tryRender(bPos[21], event); tryRender(bPos[22], event);
-                }
+                if (playermovingdirection == Direction.NORTH || playermovingdirection == Direction.SOUTH) { tryRender(bPos[2], event); tryRender(bPos[1], event); tryRender(bPos[9], event); tryRender(bPos[18], event); tryRender(bPos[10], event); tryRender(bPos[11], event); tryRender(bPos[19], event); tryRender(bPos[20], event); }
+                if (playermovingdirection == Direction.EAST || playermovingdirection == Direction.WEST) { tryRender(bPos[4], event); tryRender(bPos[3], event); tryRender(bPos[9], event); tryRender(bPos[18], event); tryRender(bPos[12], event); tryRender(bPos[13], event); tryRender(bPos[21], event); tryRender(bPos[22], event); }
              }
-             if (horiz) {
-                 for(int i=1; i<=8; i++) tryRender(bPos[i], event);
-             }
+             if (horiz) { for(int i=1; i<=8; i++) tryRender(bPos[i], event); }
         }
-
-        if (r >= 5) {
-            for(int i=1; i<=9; i++) tryRender(bPos[i], event);
-            tryRender(bPos[18], event);
-        }
-        if (r >= 6) {
-            for(int i=1; i<=22; i++) tryRender(bPos[i], event);
-        }
-        if (r == 7) {
-             for(int i=1; i<=26; i++) tryRender(bPos[i], event);
-        }
+        if (r >= 5) { for(int i=1; i<=9; i++) tryRender(bPos[i], event); tryRender(bPos[18], event); }
+        if (r >= 6) { for(int i=1; i<=22; i++) tryRender(bPos[i], event); }
+        if (r == 7) { for(int i=1; i<=26; i++) tryRender(bPos[i], event); }
     }
-
-    // --- Helper Methods to reduce Spaghetti ---
 
     private boolean checkBlockConfig(BlockPos pos) {
         Block block = mc.world.getBlockState(pos).getBlock();
@@ -435,21 +368,29 @@ public class SuperInstaMine extends Module {
 
     private void tryMine(BlockPos pos) {
         if (!checkBlockConfig(pos)) return;
-        
+
         // AutoTool Logic
         if (autoTool.get() && !mc.player.getAbilities().creativeMode) {
-             int bestSlot = InvUtils.findFastestTool(mc.player.getInventory(), mc.world.getBlockState(pos)).slot();
+             int bestSlot = InvUtils.findFastestTool(mc.world.getBlockState(pos)).slot();
              if (bestSlot != -1 && bestSlot != mc.player.getInventory().selectedSlot) {
-                 InvUtils.swap(bestSlot, !silentSwitch.get());
+                 // Check if the tool we are about to switch to is actually ALLOWED
+                 ItemStack targetStack = mc.player.getInventory().getStack(bestSlot);
+                 if (isAllowedTool(targetStack)) {
+                     InvUtils.swap(bestSlot, !silentSwitch.get());
+                 }
              }
         }
 
-        // Logic check: Creative OR Not Tool required OR Holding correct tool
-        boolean canBreak = (mc.player.getAbilities().creativeMode || !isTool(mc.player.getMainHandStack())) && BlockUtils.canBreak(pos);
+        // --- NEW STRICT CHECK ---
+        // Kalau tidak creative, kita cek apakah tangan kita memegang alat yang diizinkan (atau tangan kosong jika diizinkan)
+        if (!mc.player.getAbilities().creativeMode) {
+            if (!isAllowedTool(mc.player.getMainHandStack())) return;
+        }
+
+        boolean canBreak = (mc.player.getAbilities().creativeMode || isAllowedTool(mc.player.getMainHandStack())) && BlockUtils.canBreak(pos);
         if (!canBreak && !mc.player.getMainHandStack().isSuitableFor(mc.world.getBlockState(pos))) return;
         if (!BlockUtils.canBreak(pos)) return;
 
-        // The Exploit Packet Logic
         Runnable action = () -> {
             mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, direction));
             mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, direction));
@@ -466,8 +407,9 @@ public class SuperInstaMine extends Module {
 
     private void tryRender(BlockPos pos, Render3DEvent event) {
         if (!checkBlockConfig(pos)) return;
-        boolean canBreak = (mc.player.getAbilities().creativeMode || !isTool(mc.player.getMainHandStack())) && BlockUtils.canBreak(pos);
-        if (!canBreak && !mc.player.getMainHandStack().isSuitableFor(mc.world.getBlockState(pos))) return;
+        
+        // Render logic mengikuti aturan tool/tangan
+        if (!mc.player.getAbilities().creativeMode && !isAllowedTool(mc.player.getMainHandStack())) return;
         
         if (BlockUtils.canBreak(pos)) {
             event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
@@ -478,10 +420,14 @@ public class SuperInstaMine extends Module {
         assert mc.player != null;
         if (bPos[0].getY() == -128) return false;
         
-        // Pause on use logic
-        if (pauseOnUse.get() && (mc.player.isUsingItem() || mc.player.isEating() || mc.player.isDrinking())) return false;
-
-        return !pick.get() || (mc.player.getMainHandStack().getItem() == Items.DIAMOND_PICKAXE || mc.player.getMainHandStack().getItem() == Items.NETHERITE_PICKAXE);
+        // Pause if using items (eating/drinking/bow/shield)
+        if (pauseOnUse.get() && mc.player.isUsingItem()) return false;
+        
+        // Final gate: If not creative, must hold allowed tool OR empty hand (if allowed)
+        if (!mc.player.getAbilities().creativeMode) {
+            return isAllowedTool(mc.player.getMainHandStack());
+        }
+        return true;
     }
 
     public enum Modes {
